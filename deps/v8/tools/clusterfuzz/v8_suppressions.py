@@ -81,10 +81,6 @@ IGNORE_TEST_CASES = {
 # Regular expressions are assumed to be compiled. We use regexp.search.
 IGNORE_OUTPUT = {
   '': {
-    'crbug.com/664068':
-        re.compile(r'RangeError(?!: byte length)', re.S),
-    'crbug.com/667678':
-        re.compile(r'\[native code\]', re.S),
     'crbug.com/689877':
         re.compile(r'^.*SyntaxError: .*Stack overflow$', re.M),
   },
@@ -116,9 +112,6 @@ ALLOWED_LINE_DIFFS = [
 
   # crbug.com/680064. This subsumes one of the above expressions.
   r'^(.*)TypeError: .* function$',
-
-  # crbug.com/664068
-  r'^(.*)(?:Array buffer allocation failed|Invalid array buffer length)(.*)$',
 ]
 
 # Lines matching any of the following regular expressions will be ignored.
@@ -141,6 +134,35 @@ ALLOWED_LINE_DIFFS = [re.compile(exp) for exp in ALLOWED_LINE_DIFFS]
 IGNORE_LINES = [re.compile(exp) for exp in IGNORE_LINES]
 
 ORIGINAL_SOURCE_PREFIX = 'v8-foozzie source: '
+
+
+def get_lines_capped(output1, output2):
+  """Returns a pair of stdout line lists.
+
+  The lists are safely capped if at least one run has crashed. We assume
+  that output can never break off within the last line. If this assumption
+  turns out wrong, we need to add capping of the last line, too.
+  """
+  output1_lines = output1.stdout.splitlines()
+  output2_lines = output2.stdout.splitlines()
+
+  # No length difference or no crash -> no capping.
+  if (len(output1_lines) == len(output2_lines) or
+      (not output1.HasCrashed() and not output2.HasCrashed())):
+    return output1_lines, output2_lines
+
+  # Both runs have crashed, cap by the shorter output.
+  if output1.HasCrashed() and output2.HasCrashed():
+    cap = min(len(output1_lines), len(output2_lines))
+  # Only the first run has crashed, cap by its output length.
+  elif output1.HasCrashed():
+    cap = len(output1_lines)
+  # Similar if only the second run has crashed.
+  else:
+    cap = len(output2_lines)
+
+  return output1_lines[0:cap], output2_lines[0:cap]
+
 
 def line_pairs(lines):
   return itertools.izip_longest(
@@ -237,8 +259,8 @@ def diff_output(output1, output2, allowed, ignore1, ignore2):
   return None, source
 
 
-def get_suppression(arch1, config1, arch2, config2):
-  return V8Suppression(arch1, config1, arch2, config2)
+def get_suppression(arch1, config1, arch2, config2, skip=False):
+  return V8Suppression(arch1, config1, arch2, config2, skip)
 
 
 class Suppression(object):
@@ -259,17 +281,29 @@ class Suppression(object):
 
 
 class V8Suppression(Suppression):
-  def __init__(self, arch1, config1, arch2, config2):
+  def __init__(self, arch1, config1, arch2, config2, skip):
     self.arch1 = arch1
     self.config1 = config1
     self.arch2 = arch2
     self.config2 = config2
+    if skip:
+      self.allowed_line_diffs = []
+      self.ignore_output = {}
+      self.ignore_sources = {}
+    else:
+      self.allowed_line_diffs = ALLOWED_LINE_DIFFS
+      self.ignore_output = IGNORE_OUTPUT
+      self.ignore_sources = IGNORE_SOURCES
 
   def diff(self, output1, output2):
+    # Diff capped lines in the presence of crashes.
+    return self.diff_lines(*get_lines_capped(output1, output2))
+
+  def diff_lines(self, output1_lines, output2_lines):
     return diff_output(
-        output1.splitlines(),
-        output2.splitlines(),
-        ALLOWED_LINE_DIFFS,
+        output1_lines,
+        output2_lines,
+        self.allowed_line_diffs,
         IGNORE_LINES,
         IGNORE_LINES,
     )
@@ -292,7 +326,7 @@ class V8Suppression(Suppression):
     return None
 
   def ignore_by_metadata(self, metadata):
-    for bug, sources in IGNORE_SOURCES.iteritems():
+    for bug, sources in self.ignore_sources.iteritems():
       for source in sources:
         if source in metadata['sources']:
           return bug
@@ -311,7 +345,7 @@ class V8Suppression(Suppression):
           return bug
       return None
     for key in ['', arch, config]:
-      bug = check(IGNORE_OUTPUT.get(key, {}))
+      bug = check(self.ignore_output.get(key, {}))
       if bug:
         return bug
     return None

@@ -4,10 +4,12 @@
 # found in the LICENSE file.
 
 import os
+import random
 import subprocess
 import sys
 import unittest
 
+import v8_commands
 import v8_foozzie
 import v8_fuzz_config
 import v8_suppressions
@@ -33,35 +35,37 @@ class ConfigTest(unittest.TestCase):
 
     When experiment distribution changes this test might change, too.
     """
-    class Rng(object):
-      def random(self):
-        return 0.5
     self.assertEqual(
         [
-          '--first-config=ignition_no_ic',
-          '--second-config=ignition_turbo',
+          '--first-config=ignition',
+          '--second-config=ignition_turbo_opt',
           '--second-d8=d8',
           '--second-config-extra-flags=--stress-scavenge=100',
           '--second-config-extra-flags=--no-regexp-tier-up',
+          '--second-config-extra-flags=--no-enable-ssse3',
+          '--second-config-extra-flags=--no-enable-bmi2',
+          '--second-config-extra-flags=--no-enable-lzcnt',
         ],
-        v8_fuzz_config.Config('foo', Rng(), 42).choose_foozzie_flags(),
+        v8_fuzz_config.Config('foo', random.Random(42)).choose_foozzie_flags(),
     )
 
 
 class UnitTest(unittest.TestCase):
   def testDiff(self):
-    # TODO(machenbach): Mock out suppression configuration.
-    suppress = v8_suppressions.get_suppression(
-        'x64', 'ignition', 'x64', 'ignition_turbo')
+    def diff_fun(one, two, skip=False):
+      suppress = v8_suppressions.get_suppression(
+          'x64', 'ignition', 'x64', 'ignition_turbo', skip)
+      return suppress.diff_lines(one.splitlines(), two.splitlines())
+
     one = ''
     two = ''
     diff = None, None
-    self.assertEquals(diff, suppress.diff(one, two))
+    self.assertEquals(diff, diff_fun(one, two))
 
     one = 'a \n  b\nc();'
     two = 'a \n  b\nc();'
     diff = None, None
-    self.assertEquals(diff, suppress.diff(one, two))
+    self.assertEquals(diff, diff_fun(one, two))
 
     # Ignore line before caret, caret position and error message.
     one = """
@@ -79,7 +83,7 @@ somefile.js: TypeError: baz is not a function
   undefined
 """
     diff = None, None
-    self.assertEquals(diff, suppress.diff(one, two))
+    self.assertEquals(diff, diff_fun(one, two))
 
     one = """
 Still equal
@@ -89,7 +93,7 @@ Extra line
 Still equal
 """
     diff = '- Extra line', None
-    self.assertEquals(diff, suppress.diff(one, two))
+    self.assertEquals(diff, diff_fun(one, two))
 
     one = """
 Still equal
@@ -99,7 +103,7 @@ Still equal
 Extra line
 """
     diff = '+ Extra line', None
-    self.assertEquals(diff, suppress.diff(one, two))
+    self.assertEquals(diff, diff_fun(one, two))
 
     one = """
 undefined
@@ -111,7 +115,53 @@ otherfile.js: TypeError: undefined is not a constructor
 """
     diff = """- somefile.js: TypeError: undefined is not a constructor
 + otherfile.js: TypeError: undefined is not a constructor""", None
-    self.assertEquals(diff, suppress.diff(one, two))
+    self.assertEquals(diff, diff_fun(one, two))
+
+    # Test that skipping suppressions works.
+    one = """
+v8-foozzie source: foo
+23:TypeError: bar is not a function
+"""
+    two = """
+v8-foozzie source: foo
+42:TypeError: baz is not a function
+"""
+    self.assertEquals((None, 'foo'), diff_fun(one, two))
+    diff = """- 23:TypeError: bar is not a function
++ 42:TypeError: baz is not a function""", 'foo'
+    self.assertEquals(diff, diff_fun(one, two, skip=True))
+
+  def testOutputCapping(self):
+    def output(stdout, is_crash):
+      exit_code = -1 if is_crash else 0
+      return v8_commands.Output(
+          exit_code=exit_code, timed_out=False, stdout=stdout, pid=0)
+
+    def check(stdout1, stdout2, is_crash1, is_crash2, capped_lines1,
+              capped_lines2):
+      output1 = output(stdout1, is_crash1)
+      output2 = output(stdout2, is_crash2)
+      self.assertEquals(
+          (capped_lines1.splitlines(), capped_lines2.splitlines()),
+          v8_suppressions.get_lines_capped(output1, output2))
+
+    # No capping, already equal.
+    check('1\n2', '1\n2', True, True, '1\n2', '1\n2')
+    # No crash, no capping.
+    check('1\n2', '1\n2\n3', False, False, '1\n2', '1\n2\n3')
+    check('1\n2\n3', '1\n2', False, False, '1\n2\n3', '1\n2')
+    # Cap smallest if all runs crash.
+    check('1\n2', '1\n2\n3', True, True, '1\n2', '1\n2')
+    check('1\n2\n3', '1\n2', True, True, '1\n2', '1\n2')
+    # Cap the non-crashy run.
+    check('1\n2\n3', '1\n2', False, True, '1\n2', '1\n2')
+    check('1\n2', '1\n2\n3', True, False, '1\n2', '1\n2')
+    # The crashy run has more output.
+    check('1\n2\n3', '1\n2', True, False, '1\n2\n3', '1\n2')
+    check('1\n2', '1\n2\n3', False, True, '1\n2', '1\n2\n3')
+    # Keep output difference when capping.
+    check('1\n2', '3\n4\n5', True, True, '1\n2', '3\n4')
+    check('1\n2\n3', '4\n5', True, True, '1\n2', '4\n5')
 
 
 def cut_verbose_output(stdout):
@@ -119,28 +169,47 @@ def cut_verbose_output(stdout):
   return '\n'.join(stdout.split('\n')[4:])
 
 
-def run_foozzie(first_d8, second_d8, *extra_flags):
+def run_foozzie(second_d8_dir, *extra_flags, **kwargs):
+  second_config = 'ignition_turbo'
+  if 'second_config' in kwargs:
+    second_config = 'jitless'
   return subprocess.check_output([
     sys.executable, FOOZZIE,
     '--random-seed', '12345',
-    '--first-d8', os.path.join(TEST_DATA, first_d8),
-    '--second-d8', os.path.join(TEST_DATA, second_d8),
+    '--first-d8', os.path.join(TEST_DATA, 'baseline', 'd8.py'),
+    '--second-d8', os.path.join(TEST_DATA, second_d8_dir, 'd8.py'),
     '--first-config', 'ignition',
-    '--second-config', 'ignition_turbo',
+    '--second-config', second_config,
     os.path.join(TEST_DATA, 'fuzz-123.js'),
   ] + list(extra_flags))
 
 
 class SystemTest(unittest.TestCase):
+  """This tests the whole correctness-fuzzing harness with fake build
+  artifacts.
+
+  Overview of fakes:
+    baseline: Example foozzie output including a syntax error.
+    build1: Difference to baseline is a stack trace differece expected to
+            be suppressed.
+    build2: Difference to baseline is a non-suppressed output difference
+            causing the script to fail.
+    build3: As build1 but with an architecture difference as well.
+  """
   def testSyntaxErrorDiffPass(self):
-    stdout = run_foozzie('test_d8_1.py', 'test_d8_2.py', '--skip-sanity-checks')
+    stdout = run_foozzie('build1', '--skip-sanity-checks')
     self.assertEquals('# V8 correctness - pass\n', cut_verbose_output(stdout))
+    # Default comparison includes suppressions.
+    self.assertIn('v8_suppressions.js', stdout)
+    # Default comparison doesn't include any specific mock files.
+    self.assertNotIn('v8_mock_archs.js', stdout)
+    self.assertNotIn('v8_mock_webassembly.js', stdout)
 
   def testDifferentOutputFail(self):
     with open(os.path.join(TEST_DATA, 'failure_output.txt')) as f:
       expected_output = f.read()
     with self.assertRaises(subprocess.CalledProcessError) as ctx:
-      run_foozzie('test_d8_1.py', 'test_d8_3.py', '--skip-sanity-checks',
+      run_foozzie('build2', '--skip-sanity-checks',
                   '--first-config-extra-flags=--flag1',
                   '--first-config-extra-flags=--flag2=0',
                   '--second-config-extra-flags=--flag3')
@@ -152,10 +221,51 @@ class SystemTest(unittest.TestCase):
     with open(os.path.join(TEST_DATA, 'sanity_check_output.txt')) as f:
       expected_output = f.read()
     with self.assertRaises(subprocess.CalledProcessError) as ctx:
-      run_foozzie('test_d8_1.py', 'test_d8_3.py')
+      run_foozzie('build2')
     e = ctx.exception
     self.assertEquals(v8_foozzie.RETURN_FAIL, e.returncode)
     self.assertEquals(expected_output, e.output)
+
+  def testDifferentArch(self):
+    """Test that the architecture-specific mocks are passed to both runs when
+    we use executables with different architectures.
+    """
+    # Build 3 simulates x86, while the baseline is x64.
+    stdout = run_foozzie('build3', '--skip-sanity-checks')
+    lines = stdout.split('\n')
+    # TODO(machenbach): Don't depend on the command-lines being printed in
+    # particular lines.
+    self.assertIn('v8_mock_archs.js', lines[1])
+    self.assertIn('v8_mock_archs.js', lines[3])
+
+  def testJitless(self):
+    """Test that webassembly is mocked out when comparing with jitless."""
+    stdout = run_foozzie(
+        'build1', '--skip-sanity-checks', second_config='jitless')
+    lines = stdout.split('\n')
+    # TODO(machenbach): Don't depend on the command-lines being printed in
+    # particular lines.
+    self.assertIn('v8_mock_webassembly.js', lines[1])
+    self.assertIn('v8_mock_webassembly.js', lines[3])
+
+  def testSkipSuppressions(self):
+    """Test that the suppressions file is not passed when skipping
+    suppressions.
+    """
+    # Compare baseline with baseline. This passes as there is no difference.
+    stdout = run_foozzie(
+        'baseline', '--skip-sanity-checks', '--skip-suppressions')
+    self.assertNotIn('v8_suppressions.js', stdout)
+
+    # Compare with a build that usually suppresses a difference. Now we fail
+    # since we skip suppressions.
+    with self.assertRaises(subprocess.CalledProcessError) as ctx:
+      run_foozzie(
+          'build1', '--skip-sanity-checks', '--skip-suppressions')
+    e = ctx.exception
+    self.assertEquals(v8_foozzie.RETURN_FAIL, e.returncode)
+    self.assertNotIn('v8_suppressions.js', e.output)
+
 
 if __name__ == '__main__':
   unittest.main()

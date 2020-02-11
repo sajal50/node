@@ -17,7 +17,8 @@
 namespace v8 {
 namespace internal {
 
-CallPrinter::CallPrinter(Isolate* isolate, bool is_user_js)
+CallPrinter::CallPrinter(Isolate* isolate, bool is_user_js,
+                         SpreadErrorInArgsHint error_in_spread_args)
     : builder_(new IncrementalStringBuilder(isolate)) {
   isolate_ = isolate;
   position_ = 0;
@@ -30,6 +31,8 @@ CallPrinter::CallPrinter(Isolate* isolate, bool is_user_js)
   destructuring_prop_ = nullptr;
   destructuring_assignment_ = nullptr;
   is_user_js_ = is_user_js;
+  error_in_spread_args_ = error_in_spread_args;
+  spread_arg_ = nullptr;
   function_kind_ = kNormalFunction;
   InitializeAstVisitor(isolate);
 }
@@ -401,14 +404,23 @@ void CallPrinter::VisitProperty(Property* node) {
   }
 }
 
-void CallPrinter::VisitResolvedProperty(ResolvedProperty* node) {}
-
 void CallPrinter::VisitCall(Call* node) {
   bool was_found = false;
   if (node->position() == position_) {
+    if (error_in_spread_args_ == SpreadErrorInArgsHint::kErrorInArgs) {
+      found_ = true;
+      spread_arg_ = node->arguments()->last()->AsSpread()->expression();
+      Find(spread_arg_, true);
+
+      done_ = true;
+      found_ = false;
+      return;
+    }
+
     is_call_error_ = true;
     was_found = !found_;
   }
+
   if (was_found) {
     // Bail out if the error is caused by a direct call to a variable in
     // non-user JS code. The variable name is meaningless due to minification.
@@ -431,6 +443,16 @@ void CallPrinter::VisitCall(Call* node) {
 void CallPrinter::VisitCallNew(CallNew* node) {
   bool was_found = false;
   if (node->position() == position_) {
+    if (error_in_spread_args_ == SpreadErrorInArgsHint::kErrorInArgs) {
+      found_ = true;
+      spread_arg_ = node->arguments()->last()->AsSpread()->expression();
+      Find(spread_arg_, true);
+
+      done_ = true;
+      found_ = false;
+      return;
+    }
+
     is_call_error_ = true;
     was_found = !found_;
   }
@@ -582,7 +604,8 @@ void CallPrinter::PrintLiteral(Handle<Object> value, bool quote) {
     Print(isolate_->factory()->NumberToString(value));
   } else if (value->IsSymbol()) {
     // Symbols can only occur as literals if they were inserted by the parser.
-    PrintLiteral(handle(Handle<Symbol>::cast(value)->name(), isolate_), false);
+    PrintLiteral(handle(Handle<Symbol>::cast(value)->description(), isolate_),
+                 false);
   }
 }
 
@@ -590,7 +613,6 @@ void CallPrinter::PrintLiteral(Handle<Object> value, bool quote) {
 void CallPrinter::PrintLiteral(const AstRawString* value, bool quote) {
   PrintLiteral(value->string(), quote);
 }
-
 
 //-----------------------------------------------------------------------------
 
@@ -1050,6 +1072,9 @@ void AstPrinter::VisitTryCatchStatement(TryCatchStatement* node) {
     case HandlerTable::ASYNC_AWAIT:
       prediction = "ASYNC_AWAIT";
       break;
+    case HandlerTable::UNCAUGHT_ASYNC_AWAIT:
+      prediction = "UNCAUGHT_ASYNC_AWAIT";
+      break;
     case HandlerTable::PROMISE:
       // Catch prediction resulting in promise rejections aren't
       // parsed by the parser.
@@ -1271,6 +1296,9 @@ void AstPrinter::VisitVariableProxy(VariableProxy* node) {
       case VariableLocation::MODULE:
         SNPrintF(buf + pos, " module");
         break;
+      case VariableLocation::REPL_GLOBAL:
+        SNPrintF(buf + pos, " repl global[%d]", var->index());
+        break;
     }
     PrintLiteralWithModeIndented(buf.begin(), var, node->raw_name());
   }
@@ -1355,15 +1383,6 @@ void AstPrinter::VisitProperty(Property* node) {
     case NON_PROPERTY:
       UNREACHABLE();
   }
-}
-
-void AstPrinter::VisitResolvedProperty(ResolvedProperty* node) {
-  EmbeddedVector<char, 128> buf;
-  SNPrintF(buf, "RESOLVED-PROPERTY");
-  IndentedScope indent(this, buf.begin(), node->position());
-
-  PrintIndentedVisit("RECEIVER", node->object());
-  PrintIndentedVisit("PROPERTY", node->property());
 }
 
 void AstPrinter::VisitCall(Call* node) {

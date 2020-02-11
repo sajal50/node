@@ -102,7 +102,7 @@ Simulator* Simulator::current(Isolate* isolate) {
 
   Simulator* sim = isolate_data->simulator();
   if (sim == nullptr) {
-    if (FLAG_trace_sim || FLAG_log_instruction_stats || FLAG_debug_sim) {
+    if (FLAG_trace_sim || FLAG_debug_sim) {
       sim = new Simulator(new Decoder<DispatchingDecoderVisitor>(), isolate);
     } else {
       sim = new Decoder<Simulator>();
@@ -298,6 +298,7 @@ void Simulator::SetRedirectInstruction(Instruction* instruction) {
 Simulator::Simulator(Decoder<DispatchingDecoderVisitor>* decoder,
                      Isolate* isolate, FILE* stream)
     : decoder_(decoder),
+      guard_pages_(false),
       last_debugger_input_(nullptr),
       log_parameters_(NO_PARAM),
       isolate_(isolate) {
@@ -310,21 +311,16 @@ Simulator::Simulator(Decoder<DispatchingDecoderVisitor>* decoder,
     decoder_->InsertVisitorBefore(print_disasm_, this);
     log_parameters_ = LOG_ALL;
   }
-
-  if (FLAG_log_instruction_stats) {
-    instrument_ =
-        new Instrument(FLAG_log_instruction_file, FLAG_log_instruction_period);
-    decoder_->AppendVisitor(instrument_);
-  }
 }
 
 Simulator::Simulator()
     : decoder_(nullptr),
+      guard_pages_(false),
       last_debugger_input_(nullptr),
       log_parameters_(NO_PARAM),
       isolate_(nullptr) {
   Init(stdout);
-  CHECK(!FLAG_trace_sim && !FLAG_log_instruction_stats);
+  CHECK(!FLAG_trace_sim);
 }
 
 void Simulator::Init(FILE* stream) {
@@ -367,14 +363,13 @@ void Simulator::ResetState() {
   // Reset debug helpers.
   breakpoints_.clear();
   break_on_next_ = false;
+
+  btype_ = DefaultBType;
 }
 
 Simulator::~Simulator() {
   GlobalMonitor::Get()->RemoveProcessor(&global_monitor_processor_);
   delete[] reinterpret_cast<byte*>(stack_);
-  if (FLAG_log_instruction_stats) {
-    delete instrument_;
-  }
   delete disassembler_decoder_;
   delete print_disasm_;
   DeleteArray(last_debugger_input_);
@@ -1503,6 +1498,20 @@ void Simulator::VisitConditionalBranch(Instruction* instr) {
   }
 }
 
+Simulator::BType Simulator::GetBTypeFromInstruction(
+    const Instruction* instr) const {
+  switch (instr->Mask(UnconditionalBranchToRegisterMask)) {
+    case BLR:
+      return BranchAndLink;
+    case BR:
+      if (!PcIsInGuardedPage() || (instr->Rn() == 16) || (instr->Rn() == 17)) {
+        return BranchFromUnguardedOrToIP;
+      }
+      return BranchFromGuardedNotToIP;
+  }
+  return DefaultBType;
+}
+
 void Simulator::VisitUnconditionalBranchToRegister(Instruction* instr) {
   Instruction* target = reg<Instruction*>(instr->Rn());
   switch (instr->Mask(UnconditionalBranchToRegisterMask)) {
@@ -1522,6 +1531,7 @@ void Simulator::VisitUnconditionalBranchToRegister(Instruction* instr) {
     default:
       UNIMPLEMENTED();
   }
+  set_btype(GetBTypeFromInstruction(instr));
 }
 
 void Simulator::VisitTestBranch(Instruction* instr) {
@@ -3105,6 +3115,7 @@ void Simulator::VisitSystem(Instruction* instr) {
   // range of immediates instead of indicating a different instruction. This
   // makes the decoding tricky.
   if (instr->Mask(SystemPAuthFMask) == SystemPAuthFixed) {
+    // The BType check for PACIASP happens in CheckBType().
     switch (instr->Mask(SystemPAuthMask)) {
 #define DEFINE_PAUTH_FUNCS(SUFFIX, DST, MOD, KEY)                     \
   case PACI##SUFFIX:                                                  \
@@ -3154,6 +3165,11 @@ void Simulator::VisitSystem(Instruction* instr) {
     switch (instr->ImmHint()) {
       case NOP:
       case CSDB:
+      case BTI_jc:
+      case BTI:
+      case BTI_c:
+      case BTI_j:
+        // The BType checks happen in CheckBType().
         break;
       default:
         UNIMPLEMENTED();
@@ -3449,13 +3465,12 @@ void Simulator::Debug() {
         // trace / t
         // -------------------------------------------------------------
       } else if (strcmp(cmd, "trace") == 0 || strcmp(cmd, "t") == 0) {
-        if ((log_parameters() & (LOG_DISASM | LOG_REGS)) !=
-            (LOG_DISASM | LOG_REGS)) {
-          PrintF("Enabling disassembly and registers tracing\n");
-          set_log_parameters(log_parameters() | LOG_DISASM | LOG_REGS);
+        if ((log_parameters() & LOG_ALL) != LOG_ALL) {
+          PrintF("Enabling disassembly, registers and memory write tracing\n");
+          set_log_parameters(log_parameters() | LOG_ALL);
         } else {
-          PrintF("Disabling disassembly and registers tracing\n");
-          set_log_parameters(log_parameters() & ~(LOG_DISASM | LOG_REGS));
+          PrintF("Disabling disassembly, registers and memory write tracing\n");
+          set_log_parameters(log_parameters() & ~LOG_ALL);
         }
 
         // break / b
