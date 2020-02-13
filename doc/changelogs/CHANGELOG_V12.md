@@ -10,6 +10,7 @@
 </tr>
 <tr>
 <td valign="top">
+<a href="#12.16.1">12.16.1</a><br/>
 <a href="#12.16.0">12.16.0</a><br/>
 <a href="#12.15.0">12.15.0</a><br/>
 <a href="#12.14.1">12.14.1</a><br/>
@@ -52,6 +53,21 @@
   * [0.10.x](CHANGELOG_V010.md)
   * [io.js](CHANGELOG_IOJS.md)
   * [Archive](CHANGELOG_ARCHIVE.md)
+
+<a id="12.16.1"></a>
+## 2020-02-13, Version 12.16.1 'Erbium' (LTS), @MylesBorins
+
+### Notable changes
+
+Node.js 12.16.0 included large update to the ESM implementation in the 12.x release stream.
+One of the new features, Self Referential Modules, accidentally was released not behind the
+`--experimental-modules` flag. This release is being made specifically to appropraitely flag
+the feature which is not yet ready to be release on LTS.
+
+### Commits
+
+* [[`f0b2d875d9`](https://github.com/nodejs/node/commit/f0b2d875d9)] - **module**: 12.x self resolve flag as experimental modules (Guy Bedford) [#31757](https://github.com/nodejs/node/pull/31757)
+* [[`7a5954ef26`](https://github.com/nodejs/node/commit/7a5954ef26)] - **src**: fix -Winconsistent-missing-override warning (Colin Ihrig) [#30549](https://github.com/nodejs/node/pull/30549)
 
 <a id="12.16.0"></a>
 ## 2020-02-11, Version 12.16.0 'Erbium' (LTS), @targos
