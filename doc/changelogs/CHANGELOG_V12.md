@@ -59,7 +59,7 @@
 
 ### Notable changes
 
-Node.js 12.16.0 included large update to the ESM implementation in the 12.x release stream.
+Node.js 12.16.0 included a large update to the ESM implementation.
 One of the new features, Self Referential Modules, accidentally was released not behind the
 `--experimental-modules` flag. This release is being made specifically to appropraitely flag
 the feature which is not yet ready to be release on LTS.
