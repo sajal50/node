@@ -62,7 +62,7 @@
 Node.js 12.16.0 included a large update to the ESM implementation.
 One of the new features, Self Referential Modules, was accidentally released without requiring the
 `--experimental-modules` flag. This release is being made to appropriately flag
-the feature which is not yet ready to be release on LTS.
+the feature.
 
 ### Commits
 
