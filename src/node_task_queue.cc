@@ -27,6 +27,21 @@ using v8::Promise;
 using v8::PromiseRejectEvent;
 using v8::PromiseRejectMessage;
 using v8::Value;
+using v8::Maybe;
+using v8::Just;
+using v8::Nothing;
+
+static Maybe<double> GetAssignedPromiseAsyncId(Environment* env,
+                                               Local<Promise> promise,
+                                               Local<Value> id_symbol) {
+  Local<Value> maybe_async_id;
+  if (!promise->Get(env->context(), id_symbol).ToLocal(&maybe_async_id)) {
+    return Nothing<double>();
+  }
+  return maybe_async_id->IsNumber()
+      ? maybe_async_id->NumberValue(env->context())
+      : v8::Just(-1.0);
+}
 
 void PromiseRejectCallback(PromiseRejectMessage message) {
   static std::atomic<uint64_t> unhandledRejections{0};
@@ -79,9 +94,26 @@ void PromiseRejectCallback(PromiseRejectMessage message) {
   // V8 does not expect this callback to have a scheduled exceptions once it
   // returns, so we print them out in a best effort to do something about it
   // without failing silently and without crashing the process.
+  double async_id;
+  double trigger_async_id;
+  if (!GetAssignedPromiseAsyncId(env, promise, env->async_id_symbol())
+          .To(&async_id)) return;
+  if (!GetAssignedPromiseAsyncId(env, promise, env->trigger_async_id_symbol())
+          .To(&trigger_async_id)) return;
+
+  if (async_id != -1.0 && trigger_async_id != -1.0) {
+    env->async_hooks()->push_async_context(
+        async_id, trigger_async_id, promise);
+  }
   TryCatchScope try_catch(env);
   USE(callback->Call(
       env->context(), Undefined(isolate), arraysize(args), args));
+  if (env->execution_async_id() == async_id) {
+    // This condition might not be true if async_hooks was enabled during
+    // the promise callback execution.
+    env->async_hooks()->pop_async_context(async_id);
+  }
+
   if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
     fprintf(stderr, "Exception in PromiseRejectCallback:\n");
     PrintCaughtException(isolate, env->context(), try_catch);
